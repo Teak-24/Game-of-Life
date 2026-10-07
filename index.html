@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Juego de la Vida</title>
+  <style>
+:root { --fondo: #1d1f24; --panel: #2a2d34; --texto: #eceff4; --acento: #ffe600; }
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--fondo); color: var(--texto);
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+main { max-width: 840px; margin: 0 auto; padding: 16px; }
+h1 { margin: 0 0 4px; }
+.status { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+.badge { background: var(--panel); padding: 2px 10px; border-radius: 999px; font-weight: 600; }
+.badge.jugando { background: var(--acento); color: #000; }
+canvas {
+  display: block; width: 100%; height: auto; aspect-ratio: 1;
+  background: #808080; border-radius: 6px; cursor: pointer; touch-action: manipulation;
+}
+.controles { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 12px 0; }
+button, select, input {
+  font: inherit; padding: 8px 12px; border-radius: 6px; border: 1px solid #444;
+  background: var(--panel); color: var(--texto);
+}
+button, select { cursor: pointer; }
+.comando input { width: 100%; }
+.mensaje { min-height: 1.5em; margin: 6px 0 12px; opacity: .85; }
+button:hover { border-color: var(--acento); }
+button:focus-visible, select:focus-visible { outline: 2px solid var(--acento); outline-offset: 2px; }
+kbd { font-size: .75em; opacity: .6; margin-left: 4px; }
+label { display: flex; gap: 6px; align-items: center; }
+details { background: var(--panel); padding: 8px 12px; border-radius: 6px; }
+</style>
+</head>
+<body>
+  <main>
+    <h1>Juego de la Vida</h1>
+
+    <div class="status">
+      <span id="estado" class="badge" aria-live="polite">Pausado</span>
+      <span>Generación: <strong id="generacion">0</strong></span>
+      <span>Celdas vivas: <strong id="vivas">0</strong></span>
+    </div>
+
+    <canvas id="tablero" width="800" height="800" aria-label="Tablero del Juego de la Vida"></canvas>
+
+    <div class="controles">
+      <button id="btn-play">▶ Iniciar <kbd>Espacio</kbd></button>
+      <button id="btn-paso">⏭ Un paso <kbd>N</kbd></button>
+      <button id="btn-azar">🎲 Aleatorio <kbd>G</kbd></button>
+      <button id="btn-limpiar">🗑 Limpiar <kbd>C</kbd></button>
+      <button id="btn-patron">🧬 Patrón <kbd>P</kbd></button>
+      <label>Velocidad
+        <select id="velocidad">
+          <option value="lenta">Lenta (2 s)</option>
+          <option value="normal" selected>Normal (0,5 s)</option>
+          <option value="rapida">Rápida (0,1 s)</option>
+        </select>
+      </label>
+    </div>
+
+    <form id="form-cmd" class="comando" autocomplete="off">
+      <input id="cmd" type="text" spellcheck="false" aria-label="Comando"
+             placeholder="Escribe un comando y pulsa Enter (por ejemplo: iniciar)">
+    </form>
+    <p id="mensaje" class="mensaje" aria-live="polite"></p>
+
+    <details>
+      <summary>Comandos y reglas</summary>
+      <p><b>Comandos</b></p>
+      <ul>
+        <li><code>iniciar</code> / <code>pausa</code>: empieza o detiene la simulación.</li>
+        <li><code>paso</code> o <code>paso 10</code>: avanza una o varias generaciones.</li>
+        <li><code>azar</code>: llena el tablero con celdas al azar.</li>
+        <li><code>limpiar</code>: borra todo y pausa.</li>
+        <li><code>patron</code>: carga un oscilador de ejemplo (cada vez, el siguiente). También: <code>patron parpadeador</code>, <code>sapo</code>, <code>baliza</code> o <code>pulsar</code>.</li>
+        <li><code>velocidad lenta</code>, <code>normal</code>, <code>rapida</code> o un número en milisegundos.</li>
+        <li><code>ayuda</code>: muestra esta lista en el mensaje.</li>
+      </ul>
+      <p><b>Reglas</b></p>
+      <ul>
+        <li>Una celda viva con 2 o 3 vecinas vivas sigue viva.</li>
+        <li>Una celda viva con menos de 2 o más de 3 vecinas muere.</li>
+        <li>Una celda muerta con exactamente 3 vecinas vivas nace.</li>
+        <li>Los bordes del tablero son muros: no hay vida fuera de él.</li>
+      </ul>
+      <p>Esta aplicación está basada en el Juego de la Vida original, creado por el matemático John Conway en 1970.</p>
+    </details>
+  </main>
+  <script>
+// Juego de la Vida de Conway — versión web del programa original en Python (pygame).
+
+const TAMANO_CELDA = 20;                       // lado de cada celda en píxeles
+const ANCHO = 800, ALTO = 800;                 // tamaño del lienzo
+const COLUMNAS = ANCHO / TAMANO_CELDA;         // 40
+const FILAS = ALTO / TAMANO_CELDA;             // 40
+
+const COLOR_FONDO = "#808080";                 // gris
+const COLOR_LINEA = "#000000";                 // negro
+const COLOR_VIVA = "#ffff00";                  // amarillo
+
+const lienzo = document.getElementById("tablero");
+const ctx = lienzo.getContext("2d");
+
+// Las celdas vivas se guardan como un conjunto de textos "columna,fila".
+let vivas = new Set();
+let jugando = false;
+let generacion = 0;
+let temporizador = null;
+let intervalo = 500; // milisegundos entre generaciones
+
+const clave = (c, f) => c + "," + f;
+
+// Cuenta las vecinas vivas de cada celda cercana a una celda viva y aplica las reglas.
+// Los bordes son muros: las celdas fuera del tablero no existen.
+function siguienteGeneracion(actuales) {
+  const conteo = new Map(); // "c,f" -> número de vecinas vivas
+
+  for (const k of actuales) {
+    const [c, f] = k.split(",").map(Number);
+    for (let dc = -1; dc <= 1; dc++) {
+      for (let df = -1; df <= 1; df++) {
+        if (dc === 0 && df === 0) continue;
+        const nc = c + dc, nf = f + df;
+        if (nc < 0 || nc >= COLUMNAS || nf < 0 || nf >= FILAS) continue;
+        const kv = clave(nc, nf);
+        conteo.set(kv, (conteo.get(kv) || 0) + 1);
+      }
+    }
+  }
+
+  const nuevas = new Set();
+  for (const [k, n] of conteo) {
+    if (n === 3 || (n === 2 && actuales.has(k))) nuevas.add(k);
+  }
+  return nuevas;
+}
+
+function dibujar() {
+  ctx.fillStyle = COLOR_FONDO;
+  ctx.fillRect(0, 0, ANCHO, ALTO);
+
+  ctx.fillStyle = COLOR_VIVA;
+  for (const k of vivas) {
+    const [c, f] = k.split(",").map(Number);
+    ctx.fillRect(c * TAMANO_CELDA, f * TAMANO_CELDA, TAMANO_CELDA, TAMANO_CELDA);
+  }
+
+  ctx.strokeStyle = COLOR_LINEA;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let f = 0; f <= FILAS; f++) {
+    ctx.moveTo(0, f * TAMANO_CELDA + 0.5);
+    ctx.lineTo(ANCHO, f * TAMANO_CELDA + 0.5);
+  }
+  for (let c = 0; c <= COLUMNAS; c++) {
+    ctx.moveTo(c * TAMANO_CELDA + 0.5, 0);
+    ctx.lineTo(c * TAMANO_CELDA + 0.5, ALTO);
+  }
+  ctx.stroke();
+
+  document.getElementById("generacion").textContent = generacion;
+  document.getElementById("vivas").textContent = vivas.size;
+  const estado = document.getElementById("estado");
+  estado.textContent = jugando ? "Jugando" : "Pausado";
+  estado.classList.toggle("jugando", jugando);
+  document.getElementById("btn-play").firstChild.textContent = jugando ? "⏸ Pausar " : "▶ Iniciar ";
+}
+
+function paso() {
+  vivas = siguienteGeneracion(vivas);
+  generacion++;
+  dibujar();
+}
+
+function reiniciarTemporizador() {
+  clearInterval(temporizador);
+  temporizador = null;
+  if (jugando) {
+    temporizador = setInterval(paso, intervalo);
+  }
+}
+
+function alternarJuego() {
+  jugando = !jugando;
+  reiniciarTemporizador();
+  dibujar();
+}
+
+function limpiar() {
+  vivas = new Set();
+  jugando = false;
+  generacion = 0;
+  reiniciarTemporizador();
+  dibujar();
+}
+
+// Entre 4 y 9 celdas aleatorias por columna (160–360 intentos; las repetidas se funden).
+function aleatorio() {
+  const cantidad = (4 + Math.floor(Math.random() * 6)) * COLUMNAS;
+  const nuevas = new Set();
+  for (let i = 0; i < cantidad; i++) {
+    nuevas.add(clave(Math.floor(Math.random() * COLUMNAS), Math.floor(Math.random() * FILAS)));
+  }
+  vivas = nuevas;
+  generacion = 0;
+  dibujar();
+}
+
+// Clic: da vida o mata la celda bajo el cursor (se ajusta si el lienzo se ve más pequeño).
+lienzo.addEventListener("click", (e) => {
+  const r = lienzo.getBoundingClientRect();
+  const x = (e.clientX - r.left) * (ANCHO / r.width);
+  const y = (e.clientY - r.top) * (ALTO / r.height);
+  const k = clave(Math.floor(x / TAMANO_CELDA), Math.floor(y / TAMANO_CELDA));
+  if (vivas.has(k)) vivas.delete(k); else vivas.add(k);
+  dibujar();
+});
+
+// ---- Velocidad: mantiene el selector sincronizado con el valor real ----
+const VELOCIDADES = { lenta: 2000, normal: 500, rapida: 100 };
+
+function sincronizarVelocidad() {
+  const nombre = Object.keys(VELOCIDADES).find((n) => VELOCIDADES[n] === intervalo);
+  let personalizada = velocidadSel.querySelector('option[value="personalizada"]');
+  if (nombre) {
+    velocidadSel.value = nombre;
+    if (personalizada) personalizada.remove();
+  } else {
+    if (!personalizada) {
+      personalizada = document.createElement("option");
+      personalizada.value = "personalizada";
+      velocidadSel.appendChild(personalizada);
+    }
+    personalizada.textContent = "Personalizada (" + intervalo + " ms)";
+    velocidadSel.value = "personalizada";
+  }
+}
+
+// ---- Patrones de ejemplo (osciladores). "#" = celda viva ----
+const PATRONES = {
+  parpadeador: { nombre: "Parpadeador (periodo 2)", filas: ["###"] },
+  sapo: { nombre: "Sapo (periodo 2)", filas: [".###", "###."] },
+  baliza: { nombre: "Baliza (periodo 2)", filas: ["##..", "##..", "..##", "..##"] },
+  pulsar: { nombre: "Púlsar (periodo 3)", filas: [
+    "..###...###..",
+    ".............",
+    "#....#.#....#",
+    "#....#.#....#",
+    "#....#.#....#",
+    "..###...###..",
+    ".............",
+    "..###...###..",
+    "#....#.#....#",
+    "#....#.#....#",
+    "#....#.#....#",
+    ".............",
+    "..###...###.." ] },
+};
+const ORDEN_PATRONES = Object.keys(PATRONES);
+let siguientePatron = 0;
+
+// Coloca el patrón centrado en el tablero, reemplazando lo que había.
+function cargarPatron(clavePatron) {
+  const p = PATRONES[clavePatron];
+  const alto = p.filas.length, ancho = p.filas[0].length;
+  const c0 = Math.floor((COLUMNAS - ancho) / 2), f0 = Math.floor((FILAS - alto) / 2);
+  const nuevas = new Set();
+  p.filas.forEach((fila, df) => {
+    for (let dc = 0; dc < fila.length; dc++) if (fila[dc] === "#") nuevas.add(clave(c0 + dc, f0 + df));
+  });
+  vivas = nuevas;
+  generacion = 0;
+  dibujar();
+  return p.nombre;
+}
+
+const mensaje = (t) => { document.getElementById("mensaje").textContent = t; };
+
+// Interpreta el texto escrito en la caja de comandos.
+function ejecutar(texto) {
+  const [cmd, arg] = texto.trim().toLowerCase().split(/\s+/);
+  switch (cmd) {
+    case "iniciar": case "play": case "jugar":
+      jugando = true; reiniciarTemporizador(); dibujar(); mensaje("Simulación en marcha."); break;
+    case "pausa": case "pausar": case "pause": case "stop":
+      jugando = false; reiniciarTemporizador(); dibujar(); mensaje("Pausado."); break;
+    case "paso": case "step": {
+      const n = arg === undefined ? 1 : Number(arg);
+      if (!Number.isInteger(n) || n < 1 || n > 1000) { mensaje("Usa un número entre 1 y 1000. Ejemplo: paso 10"); break; }
+      for (let i = 0; i < n; i++) vivas = siguienteGeneracion(vivas);
+      generacion += n; dibujar(); mensaje(n === 1 ? "Avanzó 1 generación." : "Avanzó " + n + " generaciones."); break;
+    }
+    case "azar": case "aleatorio": case "random":
+      aleatorio(); mensaje("Tablero aleatorio."); break;
+    case "limpiar": case "clear":
+      limpiar(); mensaje("Tablero limpio."); break;
+    case "velocidad": case "speed": {
+      const nombres = { lenta: 2000, slow: 2000, normal: 500, rapida: 100, "rápida": 100, fast: 100 };
+      const ms = arg in nombres ? nombres[arg] : Number(arg);
+      if (!Number.isFinite(ms) || ms < 20 || ms > 5000) { mensaje("Usa: velocidad lenta, normal, rapida o un número entre 20 y 5000 (ms)."); break; }
+      intervalo = ms; sincronizarVelocidad(); reiniciarTemporizador(); mensaje("Velocidad: una generación cada " + ms + " ms."); break;
+    }
+    case "patron": case "patrón": case "pattern": {
+      let clavePatron;
+      if (arg === undefined) {
+        clavePatron = ORDEN_PATRONES[siguientePatron];
+      } else {
+        clavePatron = arg === "púlsar" ? "pulsar" : arg;
+        if (!PATRONES[clavePatron]) { mensaje("Patrones: " + ORDEN_PATRONES.join(", ") + "."); break; }
+      }
+      siguientePatron = (ORDEN_PATRONES.indexOf(clavePatron) + 1) % ORDEN_PATRONES.length;
+      mensaje("Patrón cargado: " + cargarPatron(clavePatron) + "."); break;
+    }
+    case "ayuda": case "help":
+      mensaje("Comandos: iniciar, pausa, paso [n], azar, limpiar, patron [nombre], velocidad [lenta|normal|rapida|ms]."); break;
+    case undefined: break;
+    default:
+      mensaje("No conozco «" + texto.trim() + "».");
+  }
+}
+
+const entrada = document.getElementById("cmd");
+document.getElementById("form-cmd").addEventListener("submit", (e) => {
+  e.preventDefault();
+  ejecutar(entrada.value);
+  entrada.value = "";
+});
+
+// Botones: hacen lo mismo que los comandos escritos.
+const velocidadSel = document.getElementById("velocidad");
+document.getElementById("btn-play").addEventListener("click", () => ejecutar(jugando ? "pausa" : "iniciar"));
+document.getElementById("btn-paso").addEventListener("click", () => ejecutar("paso"));
+document.getElementById("btn-azar").addEventListener("click", () => ejecutar("azar"));
+document.getElementById("btn-limpiar").addEventListener("click", () => ejecutar("limpiar"));
+document.getElementById("btn-patron").addEventListener("click", () => ejecutar("patron"));
+velocidadSel.addEventListener("change", () => {
+  if (velocidadSel.value !== "personalizada") ejecutar("velocidad " + velocidadSel.value);
+});
+
+// Atajos de teclado (solo cuando no estás escribiendo en la caja).
+document.addEventListener("keydown", (e) => {
+  if (e.target === entrada || e.target === velocidadSel) return;
+  const tecla = e.key.toLowerCase();
+  if (e.code === "Space") { e.preventDefault(); ejecutar(jugando ? "pausa" : "iniciar"); }
+  else if (tecla === "c") ejecutar("limpiar");
+  else if (tecla === "g") ejecutar("azar");
+  else if (tecla === "n") ejecutar("paso");
+  else if (tecla === "p") ejecutar("patron");
+});
+
+dibujar();
+</script>
+</body>
+</html>
